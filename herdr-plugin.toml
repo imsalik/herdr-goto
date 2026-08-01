@@ -1,0 +1,27 @@
+# herdr-plugin.toml — manifest for the herdr-goto plugin.
+#
+# A sessionx-style workspace switcher: one fzf popup (prefix+o) that fuzzy-finds
+# across open workspaces, their agents, and panes, and jumps you there. Replaces
+# herdr's built-in `goto` tree navigator. Single bash script + fzf + jq.
+#
+# SCAFFOLD — the popup wiring below is a starting point, not verified against the
+# plugin loader yet. Today the script is launched via a `[[keys.command]]` popup in
+# ~/.config/herdr/config.toml (see README "Install / wiring"). Converting that popup
+# into a plugin action is the open roadmap item; confirm how herdr surfaces a popup
+# from a plugin action before publishing.
+
+id = "herdr-goto"
+name = "herdr-goto"
+version = "0.1.0"
+description = "A sessionx-style workspace/agent/pane switcher in an fzf popup (prefix+o)."
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+
+# The action that opens the switcher. Bind a key to it in ~/.config/herdr/config.toml.
+# TODO: verify the popup launches correctly as a plugin action (vs. the current
+# `type = "popup"` keys.command). May need a launcher script akin to file-viewer's.
+[[actions]]
+id = "open-goto"
+title = "goto (workspace switcher)"
+description = "Fuzzy-find across workspaces, agents, and panes; jump to the selection."
+command = ["bash", "goto.sh"]

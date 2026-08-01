@@ -1,0 +1,10 @@
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# local agent/editor tooling
+.claude/
