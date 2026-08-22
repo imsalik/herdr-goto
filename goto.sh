@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # herdr-goto — a sessionx-style workspace switcher for Herdr.
 #
+# Launch scope: defaults to workspaces; pass a bare scope arg (or set GOTO_SCOPE)
+# to open straight into that scope, e.g. `herdr-goto agent`.
+#
 # One fzf popup, three scopes (Tab cycles; alt-w/a/p jump directly):
 #   • workspaces (default) — MRU-ordered, previous first, so popup+Enter = alt-tab.
 #       Project dirs are folded in as "+ create here" candidates. Agent presence
 #       is badged onto the workspace row (2✻) instead of listed separately.
-#   • agents — every running coding agent; Enter jumps to its pane.
+#   • agents — every running coding agent, grouped by state (blocked/working/
+#       idle/done) with its workspace shown inline; Enter jumps to its pane.
 #   • panes  — every pane (ws:tab); Enter focuses it.
 # Enter switches/creates/jumps · ctrl-x kill workspace · ctrl-r rename · ctrl-n
 # new named workspace (from the typed query) · ctrl-o toggle preview.
@@ -36,6 +40,11 @@ BLUE=$'\e[38;2;137;180;250m'    # dirs/panes  (#89b4fa)
 DIM=$'\e[38;2;127;132;156m'     # meta        (#7f849c)
 TAB=$'\t'
 
+# Entity icons, prefixed before a name so the kind reads at a glance. Swap here.
+WS_ICON='▦'    # workspace
+TAB_ICON='❐'   # tab
+PANE_ICON='◫'  # pane
+
 tilde() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}";; "$HOME") printf '~';; *) printf '%s' "$1";; esac; }
 
 agent_glyph() {  # state glyph (static: fzf can't animate a list — filled = active)
@@ -49,6 +58,15 @@ agent_glyph() {  # state glyph (static: fzf can't animate a list — filled = ac
 agent_label() {  # trailing text: only blocked gets a word (working conveys via glyph)
   case "$1" in blocked) printf '%sblocked' "$RED";; esac
 }
+agent_icon() {  # per-agent-type mark, shown instead of the agent-name word
+  case "$1" in
+    claude) printf '✻';;
+    *)      printf '◈';;
+  esac
+}
+# Bucket a raw agent_status into an ordered display group, and its accent color.
+state_bucket() { case "$1" in blocked) printf blocked;; working) printf working;; idle) printf idle;; done) printf done;; *) printf other;; esac; }
+state_color()  { case "$1" in blocked) printf '%s' "$RED";; working) printf '%s' "$YELLOW";; idle|done) printf '%s' "$GREEN";; *) printf '%s' "$DIM";; esac; }
 
 read_scope() { local s; s="$(cat "$SCOPE_FILE" 2>/dev/null)"; printf '%s' "${s:-ws}"; }
 
@@ -122,8 +140,8 @@ emit_ws_tree() {
     mark="  "; labcol="$MAUVE"
     [ "${WS_FOCUS[$wid]}" = true ] && { mark="${GREEN}●${RESET} "; labcol="${GREEN}${BOLD}"; }
     blocked=""; [ -n "${WS_BLOCKED[$wid]:-}" ] && blocked=" ${RED}◆${RESET}"
-    printf 'ws\t%s\t%s\t\t%s%s%-16s%s %s%s tabs%s%s\n' \
-      "$wid" "$wid" "$mark" "$labcol" "$label" "$RESET" "$DIM" "$tabs" "$RESET" "$blocked"
+    printf 'ws\t%s\t%s\t\t%s%s%s %-16s%s %s%s tabs%s%s\n' \
+      "$wid" "$wid" "$mark" "$labcol" "$WS_ICON" "$label" "$RESET" "$DIM" "$tabs" "$RESET" "$blocked"
     printf '%s' "${CHILD[$wid]:-}"
   done < <(ordered_wids "$ws_json")
 }
@@ -140,25 +158,47 @@ build_inventory() {
 
   case "$scope" in
     agent)
-      declare -A AROWS; local pid agent tabid st title glyph lbltxt rec wl
+      # Grouped by STATE (blocked → working → idle → done → other); the workspace
+      # is shown inline on each row instead of as a group heading. Within a state,
+      # rows keep MRU-workspace order. MATCHKEY carries agent/ws/state/title so a
+      # single query narrows across all of them.
+      declare -A BUCKET TAB_LABEL; local pid agent tabid st title glyph sb icon render rec wl tl
+      while IFS=$'\t' read -r tabid tl; do [ -n "$tabid" ] && TAB_LABEL[$tabid]="$tl"; done \
+        < <(printf '%s' "$("$herdr" tab list 2>/dev/null)" | jq -r '.result.tabs[]? | [.tab_id, .label] | @tsv')
       while IFS=$'\t' read -r pid wid agent tabid st title; do
         [ -n "$pid" ] || continue
-        wl="${WS_LABEL[$wid]:-$wid}"; glyph="$(agent_glyph "$st")$RESET"; lbltxt="$(agent_label "$st")"
-        printf -v rec '%s %s %s %s\t%s\t%s\tagent\t%s\t%s\t%s\t%s %s%s%s  %s%s%s %s%s' \
-          "$wl" "$agent" "$st" "$title" "$wid" "$wl" \
-          "$pid" "$wid" "$tabid" \
-          "$glyph" "$PINK" "$agent" "$RESET" "$lbltxt" "$RESET" "$DIM" "$title" "$RESET"
-        AROWS[$wid]+="$rec"$'\n'
+        wl="${WS_LABEL[$wid]:-$wid}"; tl="${TAB_LABEL[$tabid]:-}"
+        glyph="$(agent_glyph "$st")$RESET"; sb="$(state_bucket "$st")"; icon="$(agent_icon "$agent")"
+        # icon replaces the agent-name word; title is the prominent colored text;
+        # ws + tab trails on the right in grey.
+        render="$glyph ${PINK}${icon}${RESET}"
+        [ -n "$title" ] && render+="  ${PINK}${title}${RESET}"
+        render+="   ${DIM}${WS_ICON} ${wl}${tl:+   ${TAB_ICON} $tl}${RESET}"
+        printf -v rec '%s %s %s %s %s\t%s\t%s\tagent\t%s\t%s\t%s\t%s' \
+          "$agent" "$wl" "$tl" "$sb" "$title" \
+          "$sb" "$(state_color "$st")${sb}$RESET" \
+          "$pid" "$wid" "$tabid" "$render"
+        BUCKET["$sb"$'\x1f'"$wid"]+="$rec"$'\n'
       done < <(printf '%s' "$("$herdr" agent list 2>/dev/null)" | jq -r '.result.agents[]? | [.pane_id, .workspace_id, .agent, .tab_id, .agent_status, .terminal_title_stripped] | @tsv')
-      while IFS= read -r wid; do printf '%s' "${AROWS[$wid]:-}"; done < <(ordered_wids "$ws_json")
+      local sbk
+      for sbk in blocked working idle done other; do
+        while IFS= read -r wid; do
+          [ -n "$wid" ] || continue
+          printf '%s' "${BUCKET["$sbk"$'\x1f'"$wid"]:-}"
+        done < <(ordered_wids "$ws_json")
+      done
       ;;
     pane)
-      declare -A PROWS; local pid tabid cwd title rec wl t
+      declare -A PROWS TAB_LABEL; local pid tabid cwd title rec wl t tl
+      while IFS=$'\t' read -r tabid tl; do [ -n "$tabid" ] && TAB_LABEL[$tabid]="$tl"; done \
+        < <(printf '%s' "$("$herdr" tab list 2>/dev/null)" | jq -r '.result.tabs[]? | [.tab_id, (.label // "")] | @tsv')
       while IFS=$'\t' read -r pid wid tabid cwd title; do
         [ -n "$pid" ] || continue
-        wl="${WS_LABEL[$wid]:-$wid}"; t="$(tilde "$cwd")"
-        printf -v rec '%s %s\t%s\t%s\tpane\t%s\t%s\t%s\t%s%s%s' \
-          "$wl" "$t" "$wid" "$wl" "$pid" "$wid" "$tabid" "$BLUE" "$t" "$RESET"
+        wl="${WS_LABEL[$wid]:-$wid}"; t="$(tilde "$cwd")"; tl="${TAB_LABEL[$tabid]:-}"
+        # path stays the primary (blue) column; tab label trails on the right in grey.
+        printf -v rec '%s %s %s\t%s\t%s\tpane\t%s\t%s\t%s\t%s' \
+          "$wl" "$t" "$tl" "$wid" "${MAUVE}${WS_ICON} ${wl}${RESET}" "$pid" "$wid" "$tabid" \
+          "${BLUE}${PANE_ICON} ${t}${RESET}${tl:+   ${DIM}${TAB_ICON} ${tl}${RESET}}"
         PROWS[$wid]+="$rec"$'\n'
       done < <(printf '%s' "$("$herdr" pane list 2>/dev/null)" | jq -r '.result.panes[]? | [.pane_id, .workspace_id, .tab_id, .cwd, .terminal_title_stripped] | @tsv')
       while IFS= read -r wid; do printf '%s' "${PROWS[$wid]:-}"; done < <(ordered_wids "$ws_json")
@@ -185,7 +225,7 @@ render_grouped() {
   done <<< "$inv"
   for gk in "${gorder[@]}"; do
     hdr+="$li"$'\n'
-    printf 'hdr\t\t\t\t%s%s%s%s\n' "$MAUVE" "$BOLD" "${GLABEL[$gk]}" "$RESET"; li=$((li+1))
+    printf 'hdr\t\t\t\t%s%s%s\n' "$BOLD" "${GLABEL[$gk]}" "$RESET"; li=$((li+1))
     while IFS=$'\t' read -r type key wsid tabid render; do
       [ -n "$key" ] || continue
       printf '%s\t%s\t%s\t%s\t  %s\n' "$type" "$key" "$wsid" "$tabid" "$render"; li=$((li+1))
@@ -248,15 +288,15 @@ preview() {
       cwd="$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd // empty')"
       apane="$(printf '%s' "$panes" | jq -r --arg t "$atab" '([.result.panes[] | select(.tab_id==$t)][0].pane_id) // .result.panes[0].pane_id // empty')"
       # Line 1: accent bar + name + cwd
-      printf '%s▌%s %s%s%s   %s %s%s\n' \
-        "$MAUVE" "$RESET" "$MAUVE$BOLD" "$label" "$RESET" "$DIM" "$(tilde "$cwd")" "$RESET"
+      printf '%s▌%s %s%s %s%s   %s %s%s\n' \
+        "$MAUVE" "$RESET" "$MAUVE$BOLD" "$WS_ICON" "$label" "$RESET" "$DIM" "$(tilde "$cwd")" "$RESET"
       # Line 2: tabs on a single row; active tab bright, agent tabs get a state dot
       tline=""
       while IFS=$'\t' read -r ttid tnum tlabel tstatus; do
         [ -n "$tnum" ] || continue
         case "$tstatus" in working) dot=" ${YELLOW}●${RESET}";; blocked) dot=" ${RED}◆${RESET}";; idle|done) dot=" ${GREEN}●${RESET}";; *) dot="";; esac
-        if [ "$ttid" = "$atab" ]; then tline+="${MAUVE}${BOLD}${tnum}·${tlabel}${RESET}${dot}   "
-        else tline+="${DIM}${tnum}·${tlabel}${RESET}${dot}   "; fi
+        if [ "$ttid" = "$atab" ]; then tline+="${MAUVE}${BOLD}${TAB_ICON} ${tnum}·${tlabel}${RESET}${dot}   "
+        else tline+="${DIM}${TAB_ICON} ${tnum}·${tlabel}${RESET}${dot}   "; fi
       done < <("$herdr" tab list --workspace "$key" 2>/dev/null | jq -r '.result.tabs[]? | [.tab_id,(.number|tostring),.label,.agent_status] | @tsv')
       printf '%s\n' "$tline"
       rule; capture "$apane"
@@ -278,8 +318,8 @@ preview() {
       local cwd wl
       cwd="$("$herdr" pane list 2>/dev/null | jq -r --arg p "$key" '[.result.panes[] | select(.pane_id==$p)][0].cwd // empty')"
       wl="$("$herdr" workspace get "$wsid" 2>/dev/null | jq -r '.result.workspace.label // empty')"
-      printf '%s▌%s %s%s%s   %s %s%s\n' \
-        "$BLUE" "$RESET" "$BLUE$BOLD" "${wl:-$key}" "$RESET" "$DIM" "$(tilde "$cwd")" "$RESET"
+      printf '%s▌%s %s%s %s%s   %s %s%s\n' \
+        "$BLUE" "$RESET" "$BLUE$BOLD" "$PANE_ICON" "${wl:-$key}" "$RESET" "$DIM" "$(tilde "$cwd")" "$RESET"
       rule; capture "$key"
       ;;
   esac
@@ -330,11 +370,11 @@ rename_ws() {  # runs via `become`, so the terminal is in cooked mode: read work
 scope_name() { case "$1" in agent) printf 'agents';; pane) printf 'panes';; dir) printf 'dirs';; *) printf 'workspaces';; esac; }
 
 scope_header() {  # tab-strip; active scope bracketed + accented, others dim
-  local active="$1" out="" s name col
+  local active="$1" out="" s name col ic
   for s in ws agent pane; do
     name="$(scope_name "$s")"
-    case "$s" in ws) col="$MAUVE";; agent) col="$PINK";; pane) col="$BLUE";; esac
-    if [ "$s" = "$active" ]; then out+="${col}${BOLD}[${name}]${RESET}"; else out+="${DIM}${name}${RESET}"; fi
+    case "$s" in ws) col="$MAUVE"; ic="$WS_ICON";; agent) col="$PINK"; ic="$(agent_icon claude)";; pane) col="$BLUE"; ic="$PANE_ICON";; esac
+    if [ "$s" = "$active" ]; then out+="${col}${BOLD}${ic} [${name}]${RESET}"; else out+="${DIM}${ic} ${name}${RESET}"; fi
     out+="   "
   done
   printf '%s⇥ scope' "$out"
@@ -367,6 +407,9 @@ case "${1:-}" in
   --list)         emit_list; exit 0 ;;
   --refilter)     refilter; exit 0 ;;
   --nav)          nav "${2:-down}" "${3:-0}"; exit 0 ;;
+  --startpos)     # one-shot: after the initial load, land on the first child
+    [ -s "${STARTPOS_FILE:-}" ] && { rm -f "$STARTPOS_FILE"; printf 'pos(2)'; }
+    exit 0 ;;
   --preview)      preview "$2" "$3" "${4:-}" "${5:-}"; exit 0 ;;
   --open)         open_entry "$2" "$3" "${4:-}" "${5:-}"; exit 0 ;;
   --create-named) create_named "${2:-}"; exit 0 ;;
@@ -382,9 +425,23 @@ esac
 SCOPE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/herdr-goto-scope.XXXXXX")"
 INV_FILE="$(mktemp -u "${TMPDIR:-/tmp}/herdr-goto-inv.XXXXXX")"
 HDR_FILE="$(mktemp -u "${TMPDIR:-/tmp}/herdr-goto-hdr.XXXXXX")"
-printf 'ws' > "$SCOPE_FILE"
-export SCOPE_FILE INV_FILE HDR_FILE SELF
-trap 'rm -f "$SCOPE_FILE" "$INV_FILE" "$HDR_FILE"' EXIT
+
+# Launch scope: GOTO_SCOPE env or a bare first arg (agent|pane|ws); default ws.
+case "${GOTO_SCOPE:-${1:-}}" in agent|pane|ws) START_SCOPE="${GOTO_SCOPE:-$1}";; *) START_SCOPE=ws;; esac
+printf '%s' "$START_SCOPE" > "$SCOPE_FILE"
+# ws opens with fzf's own live search. For a grouped start scope the initial pipe
+# has ALREADY emitted the right list (no reload needed — a reload racing the
+# still-reading pipe strands the cursor on row 0). We only disable fzf's search at
+# `start` (change is bound by default for refilter). The cursor jump to the first
+# child can't happen at `start` — the pipe hasn't loaded yet — so it's driven off
+# the `load` event via a one-shot flag (STARTPOS_FILE): `load` fires when the
+# reader finishes (and after every reload), so --startpos emits pos(2) exactly
+# once then deletes the flag, leaving Tab-switch/refilter loads untouched.
+STARTPOS_FILE="$(mktemp -u "${TMPDIR:-/tmp}/herdr-goto-spos.XXXXXX")"
+if [ "$START_SCOPE" = ws ]; then START_BIND="start:unbind(change)"
+else START_BIND="start:disable-search"; printf 1 > "$STARTPOS_FILE"; fi
+export SCOPE_FILE INV_FILE HDR_FILE STARTPOS_FILE SELF
+trap 'rm -f "$SCOPE_FILE" "$INV_FILE" "$HDR_FILE" "$STARTPOS_FILE"' EXIT
 
 emit_list | fzf \
   --ansi \
@@ -395,12 +452,12 @@ emit_list | fzf \
   --border=rounded \
   --border-label=' ↵ open · ⇥ scope · ^x kill · ^r rename · ^n new ' \
   --border-label-pos=bottom \
-  --prompt='workspaces ❯ ' \
+  --prompt="$(scope_name "$START_SCOPE") ❯ " \
   --pointer='▶' \
   --marker='✓' \
   --info=inline-right \
   --height=100% \
-  --header="$(scope_header ws)" \
+  --header="$(scope_header "$START_SCOPE")" \
   --preview="bash '$SELF' --preview {1} {2} {3} {4}" \
   --preview-window='right,50%,border-left,nowrap' \
   --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8' \
@@ -408,7 +465,8 @@ emit_list | fzf \
   --color='marker:#a6e3a1,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8' \
   --color='border:#585b70,label:#7f849c,preview-border:#585b70' \
   --color='selected-bg:#45475a' \
-  --bind="start:unbind(change)" \
+  --bind="$START_BIND" \
+  --bind="load:transform:bash '$SELF' --startpos" \
   --bind="change:reload-sync(bash '$SELF' --refilter)+first+down" \
   --bind="down:transform:bash '$SELF' --nav down {n}" \
   --bind="up:transform:bash '$SELF' --nav up {n}" \
