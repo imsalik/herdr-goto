@@ -14,3 +14,9 @@ id = "open-goto"
 title = "goto (workspace switcher)"
 description = "Fuzzy-find across workspaces, agents, and panes; jump to the selection."
 command = ["bash", "goto.sh"]
+
+# Track every workspace focus (chords, navigator, sidebar, CLI) so goto's
+# previous-first MRU stays true regardless of how the switch happened.
+[[events]]
+on = "workspace.focused"
+command = ["sh", "-c", "exec bash \"${HERDR_PLUGIN_ROOT:-.}/goto.sh\" --track"]

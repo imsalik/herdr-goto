@@ -413,6 +413,13 @@ case "${1:-}" in
   --preview)      preview "$2" "$3" "${4:-}" "${5:-}"; exit 0 ;;
   --open)         open_entry "$2" "$3" "${4:-}" "${5:-}"; exit 0 ;;
   --create-named) create_named "${2:-}"; exit 0 ;;
+  --track)        # workspace.focused event hook — keep MRU true for all switch paths
+    ev="${HERDR_PLUGIN_EVENT_JSON:-}"
+    wid="$(printf '%s' "$ev" | jq -r '.workspace_id // .workspace.workspace_id // empty' 2>/dev/null)" \
+      || wid=""
+    [ -n "$wid" ] || wid="$(printf '%s' "$ev" | grep -o '"workspace_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+    mru_push "$wid"
+    exit 0 ;;
   --kill)         kill_ws "${2:-}"; exit 0 ;;
   --rename)       rename_ws "${2:-}"; exit 0 ;;
   --scope)
