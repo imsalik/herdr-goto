@@ -339,10 +339,7 @@ open_entry() {
   case "$type" in
     hdr)   exit 0 ;;   # group heading (cursor normally skips these) — no action
     ws)    mru_push "$key"; exec "$herdr" workspace focus "$key" ;;
-    # `agent focus` lost client-viewport propagation in herdr 0.9 (herdrdev/herdr#3760):
-    # it updates server state but the view doesn't follow, so the switch silently
-    # reverts. Route agents through the pane hop (workspace+tab focus still propagate).
-    agent) mru_push "$wsid"; focus_pane "$key" "$wsid" "$tabid" ;;
+    agent) mru_push "$wsid"; exec "$herdr" agent focus "$key" ;;
     pane)  mru_push "$wsid"; focus_pane "$key" "$wsid" "$tabid" ;;
     dir)
       local existing
